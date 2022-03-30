@@ -9,7 +9,7 @@ from z3 import *
 import warnings
 # gets rid of some qiskit deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-K = 10
+
 """
 This function takes in a circuit composed of CNOTS, T, T^2, T^3,... T^7, and returns a circuit with
 just CNOTS and Ts. This essentially expands the exponentials of the T gate into just repeated T gates.
@@ -119,93 +119,127 @@ def find(phase_rep):
 	num_qubits = len(mat)
 	# make a quantum circuit object
 	circ = QuantumCircuit(num_qubits)
-	
-	# initialize the z3 solver here
-	s = Solver()
-	# now we generate constraints
-	matrices = []
-	cnots = []
-	hs = []
+	K = 2
+	while K <= 10:
+		# initialize the z3 solver here
+		s = Solver()
+		
+		# now we generate constraints
+		matrices = []
+		cnots = []
+		hs = []
 
-	# generate the variables that we will be using
+		# generate the variables that we will be using
+		for k in range(K):
+			# we generate k matrices, and k CNOT operations
+			# each matrix is num_qubits by num_qubits
+			Ak = []
+			for i in range(num_qubits):
+				Ak.append([])
+				for j in range(num_qubits):
+					Ak[i].append(Bool("A^"+str(k)+"_"+str(i)+"_"+str(j))) # add the matrix element variables
+			matrices.append(Ak)
+			# each cnot has two row vectors, one for the control and one for the target
+			qk = []
+			tk = []
+			for i in range(num_qubits):
+				qk.append(Bool("q^"+str(k) + "_"+str(i)))
+				tk.append(Bool("t^"+str(k) + "_"+str(i)))
+			cnots.append((qk,tk))
+			# now we have the auxiliary variables h
+			hk = []
+			for i in range(num_qubits):
+				hk.append(Bool("h^"+str(k)+"_"+str(i)))
+			hs.append(hk)
+		# now we generate the actual constraints
+		# the first constraint is that the initial matrix is the identity matrix
+		for i in range(num_qubits):
+			s.add(matrices[0][i][i] == True)
+			for j in range(num_qubits):
+				if i != j:
+					s.add(matrices[0][i][j] == False)
+		# Then we have the final matrix clause, the final matrix is equal to the matrix in the phase
+		# representation
+		for i in range(num_qubits):
+			for j in range(num_qubits):
+				s.add(matrices[-1][i][j] == bool(mat[i][j]))
+
+		# now we need to encode that every function that we care about will at some point show up in the circuit
+		for j in phases:
+			# convert the function back into a list
+			F = list(j)
+			for index in range(len(F)):
+				F[index] = bool(int(F[index]))
+			# we have the value of the row, now we need to ensure that this row shows up somewhere
+			# in the matrices
+			clause = False
+			# loop over all matrices
+			for matrix in matrices:
+				# loop over all rows
+				for row_ind in range(num_qubits):
+					# the check we want is whether the row is equal to the function
+					row_eql_check = True
+					for index in range(num_qubits):
+						row_eql_check = And(row_eql_check, matrix[row_ind][index] == F[index])
+
+					# Or all the clauses together, so that at least 1 must be true
+					clause = Or(clause, row_eql_check)
+			# add the clause to the SAT problem
+			s.add(clause == True)
+
+		# now we need the cnot gates to be valid gates
+		# for each cnot, in both q and t, only of the terms can be 1
+		for k in range(1, K):
+			q = cnots[k][0]
+			t = cnots[k][1]
+			h = hs[k]
+
+			tmpclause = True
+			for i in range(num_qubits):
+				tmpclause = Or(tmpclause, q[i])
+			# now we AND this against 
+			tmpclause2 = True
+			for i in range(1, num_qubits):
+				for j in range(1, num_qubits):
+					if (i < j):
+						tmpclause2 = And(tmpclause2, Or(Not(q[i]), Not(q[j])))
+			s.add(And(tmpclause, tmpclause2))
+			
+			# now we do the same thing for the t vectors
+			
+			tmpclauset = True
+			for i in range(num_qubits):
+				tmpclauset = Or(tmpclauset, t[i])
+			# now we AND this against 
+			tmpclauset2 = True
+			for i in range(1, num_qubits):
+				for j in range(1, num_qubits):
+					if (i < j):
+						tmpclauset2 = And(tmpclauset2, Or(Not(t[i]), Not(t[j])))
+			s.add(And(tmpclauset, tmpclauset2))
+
+			# the cnots need to have a control and target on a different qubit
+			targ_clause = True
+			for i in range(1, num_qubits):
+				targ_clause = And(targ_clause, q[i] != t[i])
+			s.add(targ_clause)
+
+			A = matrices[k]
+			A_prev = matrices[k-1]
+
+			for i in range(num_qubits):
+				for j in range(num_qubits):
+					s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
+		if s.check() == sat:
+			print("Constraints satisfied, with K = " + str(K))
+			break
+		else:
+			K += 1
+	# now that the constraints are satisfied, we use the solution to generate a circuit
+	# we fire care about the positioning of the CNOT gates, which we can find based on the 
+	# q and t 
 	for k in range(K):
-		# we generate k matrices, and k CNOT operations
-		# each matrix is num_qubits by num_qubits
-		Ak = []
-		for i in range(num_qubits):
-			Ak.append([])
-			for j in range(num_qubits):
-				Ak[i].append(Bool("A^"+str(k)+"_"+str(i)+"_"+str(j))) # add the matrix element variables
-		matrices.append(Ak)
-		# each cnot has two row vectors, one for the control and one for the target
-		qk = []
-		tk = []
-		for i in range(num_qubits):
-			qk.append(Bool("q^"+str(k) + "_"+str(i)))
-			tk.append(Bool("t^"+str(k) + "_"+str(i)))
-		cnots.append((qk,tk))
-		# now we have the auxiliary variables h
-		hk = []
-		for i in range(num_qubits):
-			hk.append(Bool("h^"+str(k)+"_"+str(i)))
-		hs.append(hk)
-	# now we generate the actual constraints
-	# the first constraint is that the initial matrix is the identity matrix
-	for i in range(num_qubits):
-		s.add(matrices[0][i][i] == True)
-		for j in range(num_qubits):
-			if i != j:
-				s.add(matrices[0][i][j] == False)
-	# Then we have the final clause, the final matrix is equal to the matrix in the phase
-	# representation
-	for i in range(num_qubits):
-		for j in range(num_qubits):
-			s.add(matrices[-1][i][j] == bool(mat[i][j]))
-
-	# now we need the cnot gates to be valid gates
-	# for each cnot, in both q and t, only of the terms can be 1
-	for k in range(1, K):
-		q = cnots[k][0]
-		t = cnots[k][1]
-		h = hs[k]
-
-		tmpclause = True
-		for i in range(num_qubits):
-			tmpclause = Or(tmpclause, q[i])
-		# now we AND this against 
-		tmpclause2 = True
-		for i in range(1, num_qubits):
-			for j in range(1, num_qubits):
-				if (i < j):
-					tmpclause2 = And(tmpclause2, Or(Not(q[i]), Not(q[j])))
-		s.add(And(tmpclause, tmpclause2))
 		
-		# now we do the same thing for the t vectors
-		
-		tmpclauset = True
-		for i in range(num_qubits):
-			tmpclauset = Or(tmpclauset, t[i])
-		# now we AND this against 
-		tmpclauset2 = True
-		for i in range(1, num_qubits):
-			for j in range(1, num_qubits):
-				if (i < j):
-					tmpclauset2 = And(tmpclauset2, Or(Not(t[i]), Not(t[j])))
-		s.add(And(tmpclauset, tmpclauset2))
-
-		# the cnots need to have a control and target on a different qubit
-		targ_clause = True
-		for i in range(1, num_qubits):
-			targ_clause = And(targ_clause, q[i] != t[i])
-		s.add(targ_clause)
-
-		A = matrices[k]
-		A_prev = matrices[k-1]
-
-		for i in range(num_qubits):
-			for j in range(num_qubits):
-				s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
-	
 	return circ
 
 # make a testing circuit to test the phase rep on
