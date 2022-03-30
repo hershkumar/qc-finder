@@ -6,9 +6,14 @@
 from qiskit import *
 import numpy as np
 from z3 import *
+import re
 import warnings
 # gets rid of some qiskit deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+def conv(lst):
+    return lst.index(1)
+
 
 """
 This function takes in a circuit composed of CNOTS, T, T^2, T^3,... T^7, and returns a circuit with
@@ -115,11 +120,13 @@ minimal number of CNOT gates.
 def find(phase_rep):
 	# unpack the phase polynomial representation
 	mat, phases = phase_rep
+	print(mat)
+	print(phases)
 	# the number of qubits is given by the size of the array
 	num_qubits = len(mat)
 	# make a quantum circuit object
 	circ = QuantumCircuit(num_qubits)
-	K = 2
+	K = 1
 	while K <= 10:
 		# initialize the z3 solver here
 		s = Solver()
@@ -206,7 +213,6 @@ def find(phase_rep):
 			s.add(And(tmpclause, tmpclause2))
 			
 			# now we do the same thing for the t vectors
-			
 			tmpclauset = True
 			for i in range(num_qubits):
 				tmpclauset = Or(tmpclauset, t[i])
@@ -230,26 +236,51 @@ def find(phase_rep):
 			for i in range(num_qubits):
 				for j in range(num_qubits):
 					s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
+		# now check if the model is satisfiable with K cnots
 		if s.check() == sat:
 			print("Constraints satisfied, with K = " + str(K))
 			break
 		else:
+			# if its not satisfiable, we add another CNOT and try again
 			K += 1
 	# now that the constraints are satisfied, we use the solution to generate a circuit
-	# we fire care about the positioning of the CNOT gates, which we can find based on the 
-	# q and t 
+	# get the results of the model
+	model = s.model()
+	q_k = []
+	t_k = []
+	A_k = []
+
 	for k in range(K):
-		
+		A_k.append([])
+		q_k.append([])
+		t_k.append([])
+		for i in range(num_qubits):
+			q_k[k].append(int(bool(model.eval(cnots[k][0][i], model_completion=True))))
+			t_k[k].append(int(bool(model.eval(cnots[k][1][i], model_completion=True))))
+		# get the matrices as well
+		for i in range(num_qubits):
+			A_k[k].append([])
+			for j in range(num_qubits):
+				A_k[k][i].append(int(bool(model.eval(matrices[k][i][j], model_completion=True))))
+	print(q_k)
+	print(t_k)
+	
+	# now we actually make the circuit in qiskit
+	for k in range(1, K):
+		ctrl_index = conv(q_k[k])
+		targ_index = conv(t_k[k])
+		circ.cx(ctrl_index, targ_index)
 	return circ
 
 # make a testing circuit to test the phase rep on
 qc = QuantumCircuit(3)
 qc.cnot(0,1)
-qc.t(0)
-qc.t(1)
+#qc.t(0)
+#qc.t(1)
 qc.cnot(1,2)
+qc.cnot(0,2)
 
-qc.tdg(2)
+#qc.tdg(2)
 
 print(qc.draw())
 
