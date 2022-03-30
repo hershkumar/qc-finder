@@ -120,7 +120,7 @@ def circ_to_pr(circuit):
 Takes in the phase polynomial representation of a CNOT,T circuit and returns a circuit with a 
 minimal number of CNOT gates.
 """
-#TODO: Write the SAT algorithm from the paper here
+#TODO: Debug this :(
 def find(phase_rep):
 	# unpack the phase polynomial representation
 	mat, phases = phase_rep
@@ -134,16 +134,16 @@ def find(phase_rep):
 	while K <= KMAX:
 		# initialize the z3 solver here
 		s = Solver()
-		
-		# now we generate constraints
+
+		# generate the variables that we will be using
 		matrices = []
 		cnots = []
 		hs = []
 
-		# generate the variables that we will be using
-		for k in range(K):
-			# we generate k matrices, and k CNOT operations
-			# each matrix is num_qubits by num_qubits
+		
+		for k in range(0, K + 1):
+			# we generate K+1 matrices, and K CNOT operations
+			# each matrix is num_qubits by num_qubits 
 			Ak = []
 			for i in range(num_qubits):
 				Ak.append([])
@@ -209,7 +209,7 @@ def find(phase_rep):
 			A = matrices[k]
 
 			tmpclause = False
-			for i in range(num_qubits):
+			for i in range(len(q)):
 				tmpclause = Or(tmpclause, q[i])
 
 			# now we AND this against 
@@ -218,7 +218,8 @@ def find(phase_rep):
 					if (i < j):
 						tmpclause = And(tmpclause, Or(Not(q[i]), Not(q[j])))
 			s.add(tmpclause == True)
-			
+
+
 			# now we do the same thing for the t vectors
 			tmpclauset = False
 			for i in range(num_qubits):
@@ -235,18 +236,19 @@ def find(phase_rep):
 			for i in range(num_qubits):
 				targ_clause = And(targ_clause, Xor(q[i], t[i]))
 			s.add(targ_clause == True)
+			# these encoding map how each matrix turns into the next matrix
+			if k != 0:
+				A_prev = matrices[k - 1]
 
-			A_prev = matrices[k-1]
-
-			for j in range(num_qubits):
-				aux_clause = False
-				for i in range(num_qubits):
-					aux_clause = Xor(aux_clause, And(A_prev[i][j], q[i]))
-				s.add(h[j] == aux_clause)
-				
-			for i in range(num_qubits):
 				for j in range(num_qubits):
-					s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
+					aux_clause = False
+					for i in range(num_qubits):
+						aux_clause = Xor(aux_clause, And(A_prev[i][j], q[i]))
+					s.add(h[j] == aux_clause)
+					
+				for i in range(num_qubits):
+					for j in range(num_qubits):
+						s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
 		
 		# now check if the model is satisfiable with K cnots
 		if s.check() != unsat:
@@ -287,12 +289,13 @@ def find(phase_rep):
 	return circ
 
 # make a testing circuit to test the phase rep on
-qc = QuantumCircuit(3)
+qc = QuantumCircuit(2)
 qc.cnot(0,1)
+qc.cnot(1,0)
 #qc.t(0)
-qc.t(1)
-qc.cnot(1,2)
-qc.tdg(2)
+#qc.t(1)
+#qc.cnot(1,2)
+#qc.tdg(2)
 
 #qc.tdg(2)
 
