@@ -8,12 +8,16 @@ import numpy as np
 from z3 import *
 import re
 import warnings
+
+
+
 # gets rid of some qiskit deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def conv(lst):
     return lst.index(1)
 
+KMAX = 10
 
 """
 This function takes in a circuit composed of CNOTS, T, T^2, T^3,... T^7, and returns a circuit with
@@ -126,8 +130,8 @@ def find(phase_rep):
 	num_qubits = len(mat)
 	# make a quantum circuit object
 	circ = QuantumCircuit(num_qubits)
-	K = 1
-	while K <= 10:
+	K = 2
+	while K <= KMAX:
 		# initialize the z3 solver here
 		s = Solver()
 		
@@ -158,13 +162,15 @@ def find(phase_rep):
 			for i in range(num_qubits):
 				hk.append(Bool("h^"+str(k)+"_"+str(i)))
 			hs.append(hk)
+		
 		# now we generate the actual constraints
 		# the first constraint is that the initial matrix is the identity matrix
 		for i in range(num_qubits):
-			s.add(matrices[0][i][i] == True)
 			for j in range(num_qubits):
 				if i != j:
 					s.add(matrices[0][i][j] == False)
+				else:
+					s.add(matrices[0][i][j] == True)
 		# Then we have the final matrix clause, the final matrix is equal to the matrix in the phase
 		# representation
 		for i in range(num_qubits):
@@ -179,7 +185,7 @@ def find(phase_rep):
 				F[index] = bool(int(F[index]))
 			# we have the value of the row, now we need to ensure that this row shows up somewhere
 			# in the matrices
-			clause = False
+			phase_clause = False
 			# loop over all matrices
 			for matrix in matrices:
 				# loop over all rows
@@ -189,100 +195,121 @@ def find(phase_rep):
 					for index in range(num_qubits):
 						row_eql_check = And(row_eql_check, matrix[row_ind][index] == F[index])
 
-					# Or all the clauses together, so that at least 1 must be true
-					clause = Or(clause, row_eql_check)
-			# add the clause to the SAT problem
-			s.add(clause == True)
+					# Or all the phase_clauses together, so that at least 1 must be true
+					phase_clause = Or(phase_clause, row_eql_check)
+			# add the phase_clause to the SAT problem
+			s.add(phase_clause == True)
 
 		# now we need the cnot gates to be valid gates
 		# for each cnot, in both q and t, only of the terms can be 1
-		for k in range(1, K):
+		for k in range(K):
 			q = cnots[k][0]
 			t = cnots[k][1]
 			h = hs[k]
+			A = matrices[k]
 
-			tmpclause = True
+			tmpclause = False
 			for i in range(num_qubits):
 				tmpclause = Or(tmpclause, q[i])
+
 			# now we AND this against 
-			tmpclause2 = True
-			for i in range(1, num_qubits):
-				for j in range(1, num_qubits):
+			for i in range(num_qubits):
+				for j in range(num_qubits):
 					if (i < j):
-						tmpclause2 = And(tmpclause2, Or(Not(q[i]), Not(q[j])))
-			s.add(And(tmpclause, tmpclause2))
+						tmpclause = And(tmpclause, Or(Not(q[i]), Not(q[j])))
+			s.add(tmpclause == True)
 			
 			# now we do the same thing for the t vectors
-			tmpclauset = True
+			tmpclauset = False
 			for i in range(num_qubits):
 				tmpclauset = Or(tmpclauset, t[i])
 			# now we AND this against 
-			tmpclauset2 = True
-			for i in range(1, num_qubits):
-				for j in range(1, num_qubits):
+			for i in range(num_qubits):
+				for j in range(num_qubits):
 					if (i < j):
-						tmpclauset2 = And(tmpclauset2, Or(Not(t[i]), Not(t[j])))
-			s.add(And(tmpclauset, tmpclauset2))
+						tmpclauset = And(tmpclauset, Or(Not(t[i]), Not(t[j])))
+			s.add(tmpclauset == True)
 
 			# the cnots need to have a control and target on a different qubit
 			targ_clause = True
-			for i in range(1, num_qubits):
-				targ_clause = And(targ_clause, q[i] != t[i])
-			s.add(targ_clause)
+			for i in range(num_qubits):
+				targ_clause = And(targ_clause, Xor(q[i], t[i]))
+			s.add(targ_clause == True)
 
-			A = matrices[k]
 			A_prev = matrices[k-1]
 
+			for j in range(num_qubits):
+				aux_clause = False
+				for i in range(num_qubits):
+					aux_clause = Xor(aux_clause, And(A_prev[i][j], q[i]))
+				s.add(h[j] == aux_clause)
+				
 			for i in range(num_qubits):
 				for j in range(num_qubits):
 					s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
+		
 		# now check if the model is satisfiable with K cnots
-		if s.check() == sat:
+		if s.check() != unsat:
 			print("Constraints satisfied, with K = " + str(K))
 			break
 		else:
 			# if its not satisfiable, we add another CNOT and try again
+			print("unsat for K=" + str(K))
 			K += 1
-	# now that the constraints are satisfied, we use the solution to generate a circuit
-	# get the results of the model
-	model = s.model()
-	q_k = []
-	t_k = []
-	A_k = []
+	if K <= KMAX:
+		# now that the constraints are satisfied, we use the solution to generate a circuit
+		# get the results of the model
+		model = s.model()
+		q_k = []
+		t_k = []
+		A_k = []
 
-	for k in range(K):
-		A_k.append([])
-		q_k.append([])
-		t_k.append([])
-		for i in range(num_qubits):
-			q_k[k].append(int(bool(model.eval(cnots[k][0][i], model_completion=True))))
-			t_k[k].append(int(bool(model.eval(cnots[k][1][i], model_completion=True))))
-		# get the matrices as well
-		for i in range(num_qubits):
-			A_k[k].append([])
-			for j in range(num_qubits):
-				A_k[k][i].append(int(bool(model.eval(matrices[k][i][j], model_completion=True))))
-	print(q_k)
-	print(t_k)
-	
-	# now we actually make the circuit in qiskit
-	for k in range(1, K):
-		ctrl_index = conv(q_k[k])
-		targ_index = conv(t_k[k])
-		circ.cx(ctrl_index, targ_index)
+		for k in range(K):
+			A_k.append([])
+			q_k.append([])
+			t_k.append([])
+			for i in range(num_qubits):
+				q_k[k].append(int(bool(model.eval(cnots[k][0][i], model_completion=True))))
+				t_k[k].append(int(bool(model.eval(cnots[k][1][i], model_completion=True))))
+			# get the matrices as well
+			for i in range(num_qubits):
+				A_k[k].append([])
+				for j in range(num_qubits):
+					A_k[k][i].append(int(bool(model.eval(matrices[k][i][j], model_completion=True))))
+		print(q_k)
+		print(t_k)
+		
+		# now we actually make the circuit in qiskit
+		for k in range(K):
+			ctrl_index = conv(q_k[k])
+			targ_index = conv(t_k[k])
+			circ.cx(ctrl_index, targ_index)
 	return circ
 
 # make a testing circuit to test the phase rep on
 qc = QuantumCircuit(3)
 qc.cnot(0,1)
 #qc.t(0)
-#qc.t(1)
+qc.t(1)
 qc.cnot(1,2)
-qc.cnot(0,2)
+qc.tdg(2)
 
 #qc.tdg(2)
 
 print(qc.draw())
 
 pr = circ_to_pr(qc)
-print(find(pr))
+found = find(pr)
+print(found.draw())
+# run it to get the unitary
+backend = Aer.get_backend('unitary_simulator')
+
+job = execute(qc, backend)
+result = job.result()
+orig = result.get_unitary(qc)
+
+fjob = execute(found, backend)
+fresult = fjob.result()
+new = fresult.get_unitary(found)
+
+print(orig.equiv(new))
