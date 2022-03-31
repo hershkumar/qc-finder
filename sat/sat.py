@@ -5,6 +5,7 @@
 # made to work with CNOT and T circuits
 
 from qiskit import *
+from qiskit.quantum_info import Statevector
 import numpy as np
 from z3 import *
 import re
@@ -17,6 +18,9 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def conv(lst):
     return lst.index(1)
+# converts an string of integers to an array of the integers
+def phase_conv(s):
+	return list(map(int, s.split()))
 
 KMAX = 10
 
@@ -175,10 +179,10 @@ def find(pr):
 		# set up the auxiliary variables
 		# same as the rest, the first index is a dummy variable
 		h = [[-1]]
-		for k in range(1, num_qubits + 1):
+		for k in range(1, K+1):
 			hk = [[-1]]
 			# fill the rest, from 1 to num_qubits
-			for i in range(num_qubits):
+			for i in range(1, num_qubits + 1):
 				hk.append(Bool("h^"+str(k)+"_"+str(i)))
 			h.append(hk)
 
@@ -307,42 +311,83 @@ def find(pr):
 				tk.append(int(bool(model.eval(t[k][i], model_completion=True))))
 			model_t.append(tk)
 
+		# start state of the circuit
+		start = np.eye(num_qubits, dtype=np.int8)
 		# now we actually make the circuit in qiskit
+		# get the circuit data
+		qc = circ.data
+
+		# store the T instructions for later
+		t_inst = []
+		for i in range(num_qubits):
+			circ.t(i)
+			t_inst.append(qc[0])
+			del qc[0]
+
 		for k in range(0, K):
 			ctrl_index = conv(model_q[k])
 			targ_index = conv(model_t[k])
 			circ.cx(ctrl_index, targ_index)
+			
+			# now update the matrix
+			for j in range(num_qubits):
+				if start[ctrl_index][j] == 1: # if the matrix element is 1
+					start[targ_index][j] = 1 - start[targ_index][j] # flip the bit in the target row
+			# now we check if this matches any of the phases
+
+			for key in phases:
+				for row_ind in range(num_qubits):
+					equal = True
+					row = start[row_ind] # get the row of the matrix
+					for col in range(num_qubits):
+						if row[col] != int(key[col]):
+							equal = False
+					if equal:
+						# number of times we have to add a T gate
+						coeff = phases[key]
+						for rep in range(coeff):
+							qubit = row_ind
+							# now insert the gate
+							circ.t(qubit)
+						# after we finish adding it, we decrement the pair down to 0
+						phases[key] = 0
+
 		return circ
+
+def comp_global(c1,c2):
+	backend = Aer.get_backend('unitary_simulator')
+
+	job = execute(c1, backend)
+	result = job.result()
+	orig = result.get_unitary(c1)
+
+	fjob = execute(c2, backend)
+	fresult = fjob.result()
+	new = fresult.get_unitary(c2)
+
+	print(orig.equiv(new))
+
+def comp(c1,c2):
+	print(Statevector.from_instruction(c1).equiv(Statevector.from_instruction(c2)))
 
 # make a testing circuit to test the phase rep on
 qc = QuantumCircuit(3)
 qc.cnot(0,1)
-qc.cnot(1,0)
+qc.t(0)
 qc.cnot(1,2)
+qc.t(1)
+qc.s(2)
+qc.cnot(2,1)
+qc.s(2)
 qc.cnot(0,2)
-
-#qc.t(0)
-#qc.t(1)
-#qc.cnot(1,2)
-#qc.tdg(2)
-
-#qc.tdg(2)
+qc.cnot(0,1)
+qc.t(1)
 
 print(qc.draw())
 
 pr = circ_to_pr(qc)
+
 found = find(pr)
 
 print(found.draw())
-# run it to get the unitary
-backend = Aer.get_backend('unitary_simulator')
-
-job = execute(qc, backend)
-result = job.result()
-orig = result.get_unitary(qc)
-
-fjob = execute(found, backend)
-fresult = fjob.result()
-new = fresult.get_unitary(found)
-
-print(orig.equiv(new))
+comp(qc, found)
