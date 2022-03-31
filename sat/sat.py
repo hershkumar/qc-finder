@@ -16,11 +16,29 @@ import warnings
 # gets rid of some qiskit deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# function that converts a binary array representation of a qubit to an integer
 def conv(lst):
     return lst.index(1)
-# converts an string of integers to an array of the integers
-def phase_conv(s):
-	return list(map(int, s.split()))
+
+def insert_gates(circ, coeff, qubit):
+	if coeff == 1:
+		circ.t(qubit)
+	if coeff == 2:
+		circ.s(qubit)
+	if coeff == 3:
+		circ.s(qubit)
+		circ.t(qubit)
+	if coeff == 4:
+		circ.z(qubit)
+	if coeff == 5:
+		circ.z(qubit)
+		circ.t(qubit)
+	if coeff == 6:
+		circ.s(qubit)
+		circ.z(qubit)
+	if coeff == 7:
+		circ.tdg(qubit)
+	return circ
 
 KMAX = 10
 
@@ -71,10 +89,6 @@ to keep track of the coefficients of the phase polynomial, we use a dict
 the dict is keyed by the function that the phase is being applied to, which is a list
 the values will just be a coefficient, which we mod by 8.
 """
-
-"""
-Function that returns the phase polynomial representation of a passed in qiskit circuit.
-"""
 def circ_to_pr(circuit):
 	# first expand all T gates in the circuit:
 	circuit = expand_t(circuit)
@@ -121,12 +135,12 @@ def circ_to_pr(circuit):
 				phases[fstring] = phases[fstring] % 8
 	# return the phase polynomial
 	return (mat, phases)
+
 """
 Takes in the phase polynomial representation of a CNOT,T circuit and returns a circuit with a 
 minimal number of CNOT gates.
+Uses the Z3 theorem prover from Microsoft to solve SAT clauses that were encoded in the paper linked at the top.
 """
-
-
 def find(pr):
 	# unpack the phase representation into the matrix
 	# and the phases
@@ -222,7 +236,7 @@ def find(pr):
 			t_curr = t[k]
 			A_curr = A[k]
 			h_curr = h[k]
-
+			# this clause ensures that the q array has one and only one 1 among its elements
 			q_clause = False
 			for i in range(1, num_qubits + 1):
 				q_clause = Or(q_clause, q_curr[i])
@@ -256,14 +270,16 @@ def find(pr):
 				h_curr[j] = h_clause
 		
 			# and then how the matrices relate to the CNOTS and the auxiliary variables
+			# this clause governs how we get from A^k-1 to A^k, its a sort of matrix evolution clause
 			for i in range(1, num_qubits + 1):
 				for j in range(1, num_qubits + 1):
 					s.add(A[k][i - 1][j - 1] == Xor(A[k-1][i - 1][j - 1], And(t_curr[i], h_curr[j])))
-
+		# now we check if the model is satisfiable with K CNOTS
 		if s.check() == sat:
 			print("sat for K=" + str(K))
 			break
 		else:
+			# if its not, we try it with 1 more CNOT
 			print("unsat for K=" + str(k))
 			K += 1
 	# now we make the circuit
@@ -286,14 +302,16 @@ def find(pr):
 		for i in range(num_qubits):
 			ide[i][i] = 1
 		model_A.append(ide)
+		# fill the matrices
+		# this is actually not really necessary for building the circuit, so I've commented it out for now
 
-		for k in range(1, K+1):
-			Ak = []
-			for i in range(num_qubits):
-				Ak.append([])
-				for j in range(num_qubits):
-					Ak[i].append(int(bool(model.eval(A[k][i][j], model_completion=True))))
-			model_A.append(Ak)
+		# for k in range(1, K+1):
+		# 	Ak = []
+		# 	for i in range(num_qubits):
+		# 		Ak.append([])
+		# 		for j in range(num_qubits):
+		# 			Ak[i].append(int(bool(model.eval(A[k][i][j], model_completion=True))))
+		# 	model_A.append(Ak)
 
 		# the first index is a dummy index, we should never be accessing it
 		
@@ -323,10 +341,11 @@ def find(pr):
 			circ.t(i)
 			t_inst.append(qc[0])
 			del qc[0]
-
+		# loop through all the CNOTs we have
 		for k in range(0, K):
 			ctrl_index = conv(model_q[k])
 			targ_index = conv(model_t[k])
+			# attach the cnot gate to the circuit
 			circ.cx(ctrl_index, targ_index)
 			
 			# now update the matrix
@@ -336,24 +355,31 @@ def find(pr):
 			# now we check if this matches any of the phases
 
 			for key in phases:
+				# for every row in the matrix
 				for row_ind in range(num_qubits):
 					equal = True
 					row = start[row_ind] # get the row of the matrix
+					# check element by element and see if they are equal
 					for col in range(num_qubits):
 						if row[col] != int(key[col]):
 							equal = False
+					# if they are equal, we add the phase gates
 					if equal:
 						# number of times we have to add a T gate
 						coeff = phases[key]
-						for rep in range(coeff):
-							qubit = row_ind
-							# now insert the gate
-							circ.t(qubit)
+						# get the qubit number to add the gate to
+						qubit = row_ind
+						# depending on the coefficient, we insert the correct gate(s)
+						circ = insert_gates(circ, coeff, qubit)
 						# after we finish adding it, we decrement the pair down to 0
+						# this way we don't repeat adding the phase gates
 						phases[key] = 0
-
+		# return the circuit object
 		return circ
-
+"""
+This function compares the unitary matrices of the two circuits, and takes into account global phase.
+e^iphi A != A
+"""
 def comp_global(c1,c2):
 	backend = Aer.get_backend('unitary_simulator')
 
@@ -365,24 +391,33 @@ def comp_global(c1,c2):
 	fresult = fjob.result()
 	new = fresult.get_unitary(c2)
 
-	print(orig.equiv(new))
-
+	return orig.equiv(new)
+"""
+This function compares the statevectors of the two circuits, and does not take into account the global phase.
+e^iphi A == A
+"""
 def comp(c1,c2):
-	print(Statevector.from_instruction(c1).equiv(Statevector.from_instruction(c2)))
+	return Statevector.from_instruction(c1).equiv(Statevector.from_instruction(c2))
 
 # make a testing circuit to test the phase rep on
 qc = QuantumCircuit(3)
+# qc.cnot(0,1)
+# qc.t(0)
+# qc.cnot(1,2)
+# qc.t(1)
+# qc.s(2)
+# qc.cnot(2,1)
+# qc.s(2)
+# qc.cnot(0,2)
+# qc.cnot(0,1)
+# qc.t(1)
 qc.cnot(0,1)
 qc.t(0)
-qc.cnot(1,2)
-qc.t(1)
-qc.s(2)
-qc.cnot(2,1)
-qc.s(2)
-qc.cnot(0,2)
+qc.cnot(1,0)
 qc.cnot(0,1)
 qc.t(1)
-
+qc.cnot(1,2)
+qc.tdg(2)
 print(qc.draw())
 
 pr = circ_to_pr(qc)
@@ -390,4 +425,4 @@ pr = circ_to_pr(qc)
 found = find(pr)
 
 print(found.draw())
-comp(qc, found)
+print(comp(qc, found))
