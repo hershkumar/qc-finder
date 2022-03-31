@@ -1,6 +1,7 @@
 # SAT solver for quantum circuits
 # based on http://www.downloadmaghaleh.com/wp-content/uploads/edd/maghaleh/1398/13398.pdf
 # another useful source is https://uwspace.uwaterloo.ca/bitstream/handle/10012/14480/Amy_Matthew.pdf?isAllowed=y&sequence=5
+# also useful: https://www.borealisai.com/en/blog/tutorial-9-sat-solvers-i-introduction-and-applications/
 # made to work with CNOT and T circuits
 
 from qiskit import *
@@ -120,63 +121,72 @@ def circ_to_pr(circuit):
 Takes in the phase polynomial representation of a CNOT,T circuit and returns a circuit with a 
 minimal number of CNOT gates.
 """
-#TODO: Debug this :(
-def find(phase_rep):
-	# unpack the phase polynomial representation
-	mat, phases = phase_rep
-	print(mat)
-	print(phases)
-	# the number of qubits is given by the size of the array
-	num_qubits = len(mat)
-	# make a quantum circuit object
-	circ = QuantumCircuit(num_qubits)
-	K = 2
+
+
+def find(pr):
+	# unpack the phase representation into the matrix
+	# and the phases
+	G, phases = pr
+	# the number of qubits is the length of the matrix, since its square
+	num_qubits = len(G)
+	# starting number of gates
+	K = 1
+	# while we haven't hit the limit of the number of gates
 	while K <= KMAX:
-		# initialize the z3 solver here
+		# create the solver instance
 		s = Solver()
+		# first we want to set up all the variables and structures that we'll be using
+		# we have A^0, A^1, A^2 ... A^K
+		A = []
+		# A^0 is the identity
+		ide = []
+		for i in range(num_qubits):
+			ide.append([])
+			for j in range(num_qubits):
+				ide[i].append(False)
+		for i in range(num_qubits):
+			ide[i][i] = True
+		A.append(ide)
 
-		# generate the variables that we will be using
-		matrices = []
-		cnots = []
-		hs = []
-
-		
-		for k in range(0, K + 1):
-			# we generate K+1 matrices, and K CNOT operations
-			# each matrix is num_qubits by num_qubits 
+		# set up the rest of the matrices
+		for k in range(1, K+1): # A^k, where k in [1,K]
 			Ak = []
 			for i in range(num_qubits):
 				Ak.append([])
 				for j in range(num_qubits):
-					Ak[i].append(Bool("A^"+str(k)+"_"+str(i)+"_"+str(j))) # add the matrix element variables
-			matrices.append(Ak)
-			# each cnot has two row vectors, one for the control and one for the target
-			qk = []
-			tk = []
-			for i in range(num_qubits):
-				qk.append(Bool("q^"+str(k) + "_"+str(i)))
-				tk.append(Bool("t^"+str(k) + "_"+str(i)))
-			cnots.append((qk,tk))
-			# now we have the auxiliary variables h
-			hk = []
+					Ak[i].append(Bool("A^"+str(k)+"_"+str(i)+"_"+str(j)))
+			A.append(Ak)
+		# set up the cnot variables
+		# the first index is a dummy index, we should never be accessing it
+		q = [[-1]]
+		for k in range(1, K + 1):
+			qk = [[-1]]
+			for i in range(1, num_qubits + 1):
+				qk.append(Bool("q^"+str(k)+"_"+str(i)))
+			q.append(qk)
+		
+		t = [[-1]]
+		# the first index is a dummy index, we should never be accessing it
+		for k in range(1, K + 1):
+			tk = [[-1]]
+			for i in range(1, num_qubits + 1):
+				tk.append(Bool("t^"+str(k)+"_"+str(i)))
+			t.append(tk)
+		# set up the auxiliary variables
+		# same as the rest, the first index is a dummy variable
+		h = [[-1]]
+		for k in range(1, num_qubits + 1):
+			hk = [[-1]]
+			# fill the rest, from 1 to num_qubits
 			for i in range(num_qubits):
 				hk.append(Bool("h^"+str(k)+"_"+str(i)))
-			hs.append(hk)
-		
-		# now we generate the actual constraints
-		# the first constraint is that the initial matrix is the identity matrix
-		for i in range(num_qubits):
-			for j in range(num_qubits):
-				if i != j:
-					s.add(matrices[0][i][j] == False)
-				else:
-					s.add(matrices[0][i][j] == True)
-		# Then we have the final matrix clause, the final matrix is equal to the matrix in the phase
-		# representation
-		for i in range(num_qubits):
-			for j in range(num_qubits):
-				s.add(matrices[-1][i][j] == bool(mat[i][j]))
+			h.append(hk)
 
+		# Now we've set up all the variables, we can start encoding the actual clauses
+		# We encode that A^K is G
+		for i in range(num_qubits):
+			for j in range(num_qubits):
+				s.add(A[K][i][j] == bool(G[i][j]))
 		# now we need to encode that every function that we care about will at some point show up in the circuit
 		for j in phases:
 			# convert the function back into a list
@@ -187,7 +197,7 @@ def find(phase_rep):
 			# in the matrices
 			phase_clause = False
 			# loop over all matrices
-			for matrix in matrices:
+			for matrix in A:
 				# loop over all rows
 				for row_ind in range(num_qubits):
 					# the check we want is whether the row is equal to the function
@@ -200,98 +210,117 @@ def find(phase_rep):
 			# add the phase_clause to the SAT problem
 			s.add(phase_clause == True)
 
-		# now we need the cnot gates to be valid gates
-		# for each cnot, in both q and t, only of the terms can be 1
-		for k in range(K):
-			q = cnots[k][0]
-			t = cnots[k][1]
-			h = hs[k]
-			A = matrices[k]
+		# And then we get to the CNOT clauses
+		# these make sure that any CNOT we make is a valid cnot
+		for k in range(1, K + 1):
+			# set up the variables for this iteration
+			q_curr  = q[k]
+			t_curr = t[k]
+			A_curr = A[k]
+			h_curr = h[k]
 
-			tmpclause = False
-			for i in range(len(q)):
-				tmpclause = Or(tmpclause, q[i])
+			q_clause = False
+			for i in range(1, num_qubits + 1):
+				q_clause = Or(q_clause, q_curr[i])
+			for i in range(1, num_qubits + 1):
+				for j in range(1, num_qubits + 1):
+					if i < j:
+						q_clause = And(q_clause, Not(And(q_curr[i], q_curr[j])))
+			s.add(q_clause == True)
 
-			# now we AND this against 
-			for i in range(num_qubits):
-				for j in range(num_qubits):
-					if (i < j):
-						tmpclause = And(tmpclause, Or(Not(q[i]), Not(q[j])))
-			s.add(tmpclause == True)
+			# now we do the same clause for the t arrays
+			t_clause = False
+			for i in range(1, num_qubits + 1):
+				t_clause = Or(t_clause, t_curr[i])
+			for i in range(1, num_qubits + 1):
+				for j in range(1, num_qubits + 1):
+					if i < j:
+						t_clause = And(t_clause, Not(And( t_curr[i],t_curr[j])))
+			s.add(t_clause == True)
 
+			# now make sure that the control and target are different qubits
+			cnot_clause = True
+			for i in range(1, num_qubits + 1):
+				cnot_clause = And(cnot_clause, q_curr[i] == t_curr[i])
+			s.add(cnot_clause == False)
 
-			# now we do the same thing for the t vectors
-			tmpclauset = False
-			for i in range(num_qubits):
-				tmpclauset = Or(tmpclauset, t[i])
-			# now we AND this against 
-			for i in range(num_qubits):
-				for j in range(num_qubits):
-					if (i < j):
-						tmpclauset = And(tmpclauset, Or(Not(t[i]), Not(t[j])))
-			s.add(tmpclauset == True)
-
-			# the cnots need to have a control and target on a different qubit
-			targ_clause = True
-			for i in range(num_qubits):
-				targ_clause = And(targ_clause, Xor(q[i], t[i]))
-			s.add(targ_clause == True)
-			# these encoding map how each matrix turns into the next matrix
-			if k != 0:
-				A_prev = matrices[k - 1]
-
-				for j in range(num_qubits):
-					aux_clause = False
-					for i in range(num_qubits):
-						aux_clause = Xor(aux_clause, And(A_prev[i][j], q[i]))
-					s.add(h[j] == aux_clause)
-					
-				for i in range(num_qubits):
-					for j in range(num_qubits):
-						s.add(A[i][j] == Xor(A_prev[i][j], And(t[i], h[j])))
+			# Now define the auxiliary variables
+			for j in range(1, num_qubits + 1):
+				h_clause = False
+				for i in range(1, num_qubits + 1):
+					h_clause = Xor(h_clause, And(A[k - 1][i - 1][j - 1], q_curr[i]))
+				h_curr[j] = h_clause
 		
-		# now check if the model is satisfiable with K cnots
-		if s.check() != unsat:
-			print("Constraints satisfied, with K = " + str(K))
+			# and then how the matrices relate to the CNOTS and the auxiliary variables
+			for i in range(1, num_qubits + 1):
+				for j in range(1, num_qubits + 1):
+					s.add(A[k][i - 1][j - 1] == Xor(A[k-1][i - 1][j - 1], And(t_curr[i], h_curr[j])))
+
+		if s.check() == sat:
+			print("sat for K=" + str(K))
 			break
 		else:
-			# if its not satisfiable, we add another CNOT and try again
-			print("unsat for K=" + str(K))
+			print("unsat for K=" + str(k))
 			K += 1
+	# now we make the circuit
 	if K <= KMAX:
 		# now that the constraints are satisfied, we use the solution to generate a circuit
 		# get the results of the model
 		model = s.model()
-		q_k = []
-		t_k = []
-		A_k = []
-
-		for k in range(K):
-			A_k.append([])
-			q_k.append([])
-			t_k.append([])
-			for i in range(num_qubits):
-				q_k[k].append(int(bool(model.eval(cnots[k][0][i], model_completion=True))))
-				t_k[k].append(int(bool(model.eval(cnots[k][1][i], model_completion=True))))
-			# get the matrices as well
-			for i in range(num_qubits):
-				A_k[k].append([])
-				for j in range(num_qubits):
-					A_k[k][i].append(int(bool(model.eval(matrices[k][i][j], model_completion=True))))
-		print(q_k)
-		print(t_k)
+		# make a quantum circuit object
+		circ = QuantumCircuit(num_qubits)
 		
+		model_A = []
+		model_q = []
+		model_t = []
+		# fill the lists with dummy variables to start
+		ide = []
+		for i in range(num_qubits):
+			ide.append([])
+			for j in range(num_qubits):
+				ide[i].append(0)
+		for i in range(num_qubits):
+			ide[i][i] = 1
+		model_A.append(ide)
+
+		for k in range(1, K+1):
+			Ak = []
+			for i in range(num_qubits):
+				Ak.append([])
+				for j in range(num_qubits):
+					Ak[i].append(int(bool(model.eval(A[k][i][j], model_completion=True))))
+			model_A.append(Ak)
+
+		# the first index is a dummy index, we should never be accessing it
+		
+		for k in range(1, K + 1):
+			qk = []
+			for i in range(1, num_qubits + 1):
+				qk.append(int(bool(model.eval(q[k][i], model_completion=True))))
+			model_q.append(qk)
+
+		# the first index is a dummy index, we should never be accessing it
+		
+		for k in range(1, K + 1):
+			tk = []
+			for i in range(1, num_qubits + 1):
+				tk.append(int(bool(model.eval(t[k][i], model_completion=True))))
+			model_t.append(tk)
+
 		# now we actually make the circuit in qiskit
-		for k in range(K):
-			ctrl_index = conv(q_k[k])
-			targ_index = conv(t_k[k])
+		for k in range(0, K):
+			ctrl_index = conv(model_q[k])
+			targ_index = conv(model_t[k])
 			circ.cx(ctrl_index, targ_index)
-	return circ
+		return circ
 
 # make a testing circuit to test the phase rep on
-qc = QuantumCircuit(2)
+qc = QuantumCircuit(3)
 qc.cnot(0,1)
 qc.cnot(1,0)
+qc.cnot(1,2)
+qc.cnot(0,2)
+
 #qc.t(0)
 #qc.t(1)
 #qc.cnot(1,2)
@@ -303,6 +332,7 @@ print(qc.draw())
 
 pr = circ_to_pr(qc)
 found = find(pr)
+
 print(found.draw())
 # run it to get the unitary
 backend = Aer.get_backend('unitary_simulator')
