@@ -10,7 +10,7 @@ import numpy as np
 from z3 import *
 import re
 import warnings
-
+import random
 
 
 # gets rid of some qiskit deprecation warnings
@@ -141,7 +141,7 @@ Takes in the phase polynomial representation of a CNOT,T circuit and returns a c
 minimal number of CNOT gates.
 Uses the Z3 theorem prover from Microsoft to solve SAT clauses that were encoded in the paper linked at the top.
 """
-def find(pr):
+def find(pr, verbose=False):
 	# unpack the phase representation into the matrix
 	# and the phases
 	G, phases = pr
@@ -276,11 +276,13 @@ def find(pr):
 					s.add(A[k][i - 1][j - 1] == Xor(A[k-1][i - 1][j - 1], And(t_curr[i], h_curr[j])))
 		# now we check if the model is satisfiable with K CNOTS
 		if s.check() == sat:
-			print("sat for K=" + str(K))
+			if verbose:
+				print("sat for K=" + str(K))
 			break
 		else:
 			# if its not, we try it with 1 more CNOT
-			print("unsat for K=" + str(k))
+			if verbose:
+				print("unsat for K=" + str(k))
 			K += 1
 	# now we make the circuit
 	if K <= KMAX:
@@ -399,30 +401,48 @@ e^iphi A == A
 def comp(c1,c2):
 	return Statevector.from_instruction(c1).equiv(Statevector.from_instruction(c2))
 
-# make a testing circuit to test the phase rep on
-qc = QuantumCircuit(3)
-# qc.cnot(0,1)
-# qc.t(0)
-# qc.cnot(1,2)
-# qc.t(1)
-# qc.s(2)
-# qc.cnot(2,1)
-# qc.s(2)
-# qc.cnot(0,2)
-# qc.cnot(0,1)
-# qc.t(1)
-qc.cnot(0,1)
-qc.t(0)
-qc.cnot(1,0)
-qc.cnot(0,1)
-qc.t(1)
-qc.cnot(1,2)
-qc.tdg(2)
-print(qc.draw())
+"""
+This function takes in a qiskit circuit and optimizes it for cnot cost.
+It first converts it to phase polynomial form, then runs that through the SAT solver.
+"""
+def optimize(circuit):
+	return find(circ_to_pr(circuit))
 
-pr = circ_to_pr(qc)
+"""
+A kind of janky function that generates circuits of n qubits and then
+checks whether the SAT solver outputs an identical circuit
+"""
+def sat_test(num_qubits, num_circuits, num_gates):
+	passed = True
+	
+	for i in range(num_circuits):
+		print("Circuit number " + str(i+1))
+		circ = QuantumCircuit(num_qubits)
+		# randomly generate combinations of T and CNOT gates
+		for k in range(num_gates):
+			# pick a random number to see whether it is a cnot or a T
+			is_cnot = True if random.randrange(0,2) == 0 else False 
+			if is_cnot:
+				# pick two numbers for the qubits
+				ctrl = random.randrange(0, num_qubits)
+				targ = random.randrange(0, num_qubits)
+				while targ == ctrl:
+					targ = random.randrange(0, num_qubits)
+				#apply it to the circuit
+				circ.cnot(ctrl, targ)
+			else:
+				qubit = random.randrange(0,num_qubits)
+				circ.t(qubit)
+		found = optimize(circ)
+		print(circ.draw())
+		print(found.draw())
+		same = comp(circ, found)
+		if same == False:
+			passed = False
+		print(same)
+	if passed:
+		print("Test passed!")
+	else:
+		print("Test failed!")
 
-found = find(pr)
-
-print(found.draw())
-print(comp(qc, found))
+sat_test(3, 1, 25)
